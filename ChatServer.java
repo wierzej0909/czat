@@ -101,5 +101,4 @@ public class ChatServer {
         void sendUserList(String users) {
             out.println("USERS:" + users);
         }
-    }
-}
+    
