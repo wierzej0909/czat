@@ -1,104 +1,115 @@
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
 import java.io.*;
 import java.net.*;
-import java.util.*;
+import java.util.function.Consumer;
 
-public class ChatServer {
-    private static final int PORT = 12345;
-    private static final Map<String, ClientHandler> clients = Collections.synchronizedMap(new HashMap<>());
+public class ChatClientGUI extends JFrame {
+    private JTextArea chatArea;
+    private JTextField inputField;
+    private JComboBox<String> usersList;
+    private ChatClient client;
+
+    public ChatClientGUI(String username, String host, int port) {
+        setTitle("Czat - " + username);
+        setSize(500, 400);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+
+        chatArea = new JTextArea();
+        chatArea.setEditable(false);
+        inputField = new JTextField();
+        usersList = new JComboBox<>();
+        usersList.addItem("Wszyscy");
+        JButton sendButton = new JButton("Wyślij");
+
+        JPanel panelBottom = new JPanel(new BorderLayout());
+        panelBottom.add(usersList, BorderLayout.WEST);
+        panelBottom.add(inputField, BorderLayout.CENTER);
+        panelBottom.add(sendButton, BorderLayout.EAST);
+
+        add(new JScrollPane(chatArea), BorderLayout.CENTER);
+        add(panelBottom, BorderLayout.SOUTH);
+
+        sendButton.addActionListener(e -> sendMessage());
+        inputField.addActionListener(e -> sendMessage());
+
+        try {
+            client = new ChatClient(host, port, username,
+                    msg -> SwingUtilities.invokeLater(() -> chatArea.append(msg + "\n")),
+                    users -> SwingUtilities.invokeLater(() -> updateUsers(users)));
+        } catch (IOException e) {
+            JOptionPane.showMessageDialog(this, "Nie można połączyć z serwerem.");
+            System.exit(1);
+        }
+    }
+
+    private void updateUsers(String[] users) {
+        usersList.removeAllItems();
+        usersList.addItem("Wszyscy");
+        for (String u : users) { usersList.addItem(u); }
+    }
+
+    private void sendMessage() {
+        String text = inputField.getText().trim();
+        if (!text.isEmpty()) {
+            String target = (String) usersList.getSelectedItem();
+            if (target != null && !"Wszyscy".equals(target)) {
+                client.sendMessage("@" + target + " " + text);
+            } else {
+                client.sendMessage(text);
+            }
+            inputField.setText("");
+        }
+    }
 
     public static void main(String[] args) {
-        System.out.println("Serwer czatu uruchomiony na porcie " + PORT);
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            while (true) {
-                Socket socket = serverSocket.accept();
-                new Thread(new ClientHandler(socket)).start();
+        // Ustawiamy login testowy, żeby GUI zawsze się odpalało
+        String username = "Marek"; // zmień na inny przy drugim kliencie
+        SwingUtilities.invokeLater(() -> new ChatClientGUI(username, "localhost", 6000).setVisible(true));
+    }
+}
+
+// =================== KLIENT =========================
+class ChatClient {
+    private Socket socket;
+    private PrintWriter out;
+    private BufferedReader in;
+    private Consumer<String> messageHandler;
+    private Consumer<String[]> userListHandler;
+
+    public ChatClient(String host, int port, String username,
+                      Consumer<String> messageHandler,
+                      Consumer<String[]> userListHandler) throws IOException {
+        this.messageHandler = messageHandler;
+        this.userListHandler = userListHandler;
+        socket = new Socket(host, port);
+        out = new PrintWriter(socket.getOutputStream(), true);
+        in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+
+        new Thread(this::listen).start();
+
+        if ("PODAJ_LOGIN".equals(in.readLine())) {
+            out.println(username);
+        }
+    }
+
+    private void listen() {
+        try {
+            String line;
+            while ((line = in.readLine()) != null) {
+                if (line.startsWith("MSG:")) { messageHandler.accept(line.substring(4)); }
+                else if (line.startsWith("USERS:")) {
+                    String[] users = line.substring(6).split(",");
+                    userListHandler.accept(users);
+                }
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            messageHandler.accept("Połączenie z serwerem zakończone.");
         }
     }
 
-    static void broadcast(String message, String fromUser) {
-        synchronized (clients) {
-            for (ClientHandler client : clients.values()) {
-                client.sendMessage(fromUser + ": " + message);
-            }
-        }
-    }
+    public void sendMessage(String message) { out.println(message); }
+    public void close() { try { socket.close(); } catch (IOException e) {} }
+}
 
-    static void privateMessage(String message, String fromUser, String toUser) {
-        ClientHandler recipient = clients.get(toUser);
-        if (recipient != null) {
-            recipient.sendMessage("(Priv od " + fromUser + "): " + message);
-        }
-    }
-
-    static void updateUserList() {
-        String users = String.join(",", clients.keySet());
-        synchronized (clients) {
-            for (ClientHandler client : clients.values()) {
-                client.sendUserList(users);
-            }
-        }
-    }
-
-    static class ClientHandler implements Runnable {
-        private Socket socket;
-        private PrintWriter out;
-        private BufferedReader in;
-        private String userName;
-
-        public ClientHandler(Socket socket) {
-            this.socket = socket;
-        }
-
-        public void run() {
-            try {
-                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                out = new PrintWriter(socket.getOutputStream(), true);
-
-                out.println("PODAJ_LOGIN");
-                userName = in.readLine();
-                synchronized (clients) {
-                    clients.put(userName, this);
-                }
-                System.out.println(userName + " dołączył do czatu.");
-                broadcast("dołączył do czatu.", userName);
-                updateUserList();
-
-                String input;
-                while ((input = in.readLine()) != null) {
-                    if (input.startsWith("@")) {
-                        // Wiadomość prywatna
-                        int firstSpace = input.indexOf(' ');
-                        if (firstSpace != -1) {
-                            String targetUser = input.substring(1, firstSpace);
-                            String msg = input.substring(firstSpace + 1);
-                            privateMessage(msg, userName, targetUser);
-                        }
-                    } else {
-                        broadcast(input, userName);
-                    }
-                }
-            } catch (IOException e) {
-                System.out.println(userName + " rozłączony.");
-            } finally {
-                try {
-                    socket.close();
-                } catch (IOException e) { }
-                synchronized (clients) {
-                    clients.remove(userName);
-                }
-                broadcast("opuścił czat.", userName);
-                updateUserList();
-            }
-        }
-
-        void sendMessage(String message) {
-            out.println("MSG:" + message);
-        }
-
-        void sendUserList(String users) {
-            out.println("USERS:" + users);
-        }
-    
